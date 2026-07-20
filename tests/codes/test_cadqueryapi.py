@@ -1021,6 +1021,39 @@ class TestInternalHelpers:
         assert "UnifySameDomain failed" in mock_warn.call_args[0][0]
         assert result is shape
 
+    @patch(f"{CORE}.bluemira_warn")
+    def test_unify_same_domain_rejects_invalid_result(self, mock_warn):
+        """An invalid unified shape is discarded in favour of the input.
+
+        OCC's UnifySameDomain can merge faces of a spline-bounded solid that it
+        should not and hand back a shape that fails BRepCheck and reports a
+        nonsense volume. Splitter faces are cosmetic; a corrupt shape is not.
+        """
+        shape = _make_box().fuse(cadapi.translate_shape(_make_box(), (1, 0, 0)))
+        cleaned = MagicMock()
+        cleaned.isValid.return_value = False
+
+        with patch.object(type(shape), "clean", return_value=cleaned):
+            result = cadapi._unify_same_domain(shape)
+
+        mock_warn.assert_called_once()
+        assert "invalid" in mock_warn.call_args[0][0]
+        assert result is shape
+
+    def test_unify_same_domain_guard_does_not_apply_to_faces(self):
+        """On faces an invalid unification is the repair, not a failure.
+
+        Fusing coplanar faces yields a compound that fails ``isValid`` before
+        and after unification while still merging into the single face the
+        caller needs; guarding that away would break the merge.
+        """
+        shape = _make_box().Faces()[0]
+        cleaned = MagicMock()
+        cleaned.isValid.return_value = False
+
+        with patch.object(type(shape), "clean", return_value=cleaned):
+            assert cadapi._unify_same_domain(shape) is cleaned
+
     # ---- _align_faces_coaxis / co-axis boolean_fuse -----------------------------
 
     @staticmethod

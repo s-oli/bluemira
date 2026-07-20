@@ -1731,56 +1731,38 @@ def boolean_fuse(shapes: list, *, remove_splitter: bool = True) -> apiShape:
     return result
 
 
-def _reconstruct_solid(cq_solid: apiSolid):
-    sh = _collect_subshapes(cq_solid, cq.Shell)
-    print("Solid", cq_solid.isValid(), cq_solid.Orientation)
-    if len(sh) > 1:
-        raise NotImplementedError
-    ss = sh[0]
-    print("Shell", ss.isValid(), ss.Orientation, ss)
-    fc = _collect_subshapes(ss, cq.Face)
+def _reconstruct_solid(cq_solid: apiSolid) -> apiSolid:
+    """Rebuild a solid whose shell carries invalid faces.
+
+    Each broken face is remade from its boundary wire and the shell reassembled.
+
+    Returns
+    -------
+    :
+        The rebuilt solid.
+
+    Raises
+    ------
+    NotImplementedError
+        If the solid has more than one shell, or a broken face has an inner wire.
+    """
+    shells = _collect_subshapes(cq_solid, cq.Shell)
+    if len(shells) > 1:
+        raise NotImplementedError("Cannot reconstruct a solid with multiple shells.")
+
     new_faces = []
-    for f in fc:
-        print("Face", f.isValid(), f.Orientation)
-        if not f.isValid():
-            wc = _collect_subshapes(f, cq.Wire)
-            if len(wc) > 1:
-                # probably face with a hole in
-                raise NotImplementedError
-            w = wc[0]
-            print("Wire", w.isValid(), w.Orientation)
-            new_face = _face_from_wires_tolerant(wire_from_edges(w.Edges()), [])
-            import ipdb
+    for face in _collect_subshapes(shells[0], cq.Face):
+        if face.isValid():
+            new_faces.append(face)
+            continue
+        wires = _collect_subshapes(face, cq.Wire)
+        if len(wires) > 1:
+            raise NotImplementedError("Cannot reconstruct a face with a hole in it.")
+        new_faces.append(
+            _face_from_wires_tolerant(wire_from_edges(wires[0].Edges()), [])
+        )
 
-            ipdb.set_trace()
-            print("New face", new_face.isValid(), new_face.Orientation)
-            new_faces.append(new_face)
-        else:
-            new_faces.append(f)
-
-    shell = make_shell(new_faces)
-    print("new shell", shell.isValid(), shell.Orientation)
-    solid = make_solid(shell)
-    print("new solid", solid.isValid(), solid.Orientation)
-    if not solid.isValid():
-        sh = _collect_subshapes(solid, cq.Shell)
-        print("Solid", solid.isValid(), solid.Orientation)
-        for ss in sh:
-            print("Shell", ss.isValid(), ss.Orientation)
-            sh2 = _collect_subshapes(ss, cq.Shell)
-            for _sh in sh2:
-                print("inner shells", _sh.isValid(), _sh.Orientation)
-                fc = _collect_subshapes(_sh, cq.Face)
-                for f in fc:
-                    print("Face", f.isValid(), f.Orientation)
-                    if not f.isValid():
-                        wc = _collect_subshapes(f, cq.Wire)
-                        for w in wc:
-                            print("Wire", w.isValid(), w.Orientation)
-                            edges = w.Edges()
-                            for e in edges:
-                                print("Edge", e.isValid(), e.Orientation)
-    return solid
+    return make_solid(make_shell(new_faces))
 
 
 def _sew_shapes(s_to_sew, tolerance=1e-5):
@@ -1796,12 +1778,32 @@ def _sew_shapes(s_to_sew, tolerance=1e-5):
 
 
 def _unify_same_domain(shape: apiShape) -> apiShape:
-    """Merge coplanar connected faces and collinear edges via OCC UnifySameDomain."""
+    """Merge coplanar connected faces and collinear edges via OCC UnifySameDomain.
+
+    Tidying up is optional; a correct shape is not. On solids bounded by spline
+    faces ``UnifySameDomain`` can merge faces it should not and return a shape
+    that fails ``BRepCheck`` and reports a nonsense volume. Downstream that is
+    worse than the splitter faces it removes: the next boolean either yields
+    garbage or dies on a null shape. So refuse a result that is invalid when the
+    input was not.
+
+    The guard covers solids only. On faces, unification is the *repair* step --
+    a fused compound of coplanar faces routinely fails ``isValid`` both before
+    and after while still merging into the one face the caller needs -- so
+    there validity is not a signal that anything went wrong.
+    """
     try:
-        return shape.clean()
+        cleaned = shape.clean()
     except Exception as exc:  # noqa: BLE001
         bluemira_warn(f"UnifySameDomain failed: {exc}")
         return shape
+    has_solids = TopExp_Explorer(shape.wrapped, TopAbs_SOLID).More()
+    if has_solids and shape.isValid() and not cleaned.isValid():
+        bluemira_warn(
+            "UnifySameDomain turned a valid solid invalid; keeping the un-unified one."
+        )
+        return shape
+    return cleaned
 
 
 def _assemble_wires_from_edges(edges: list) -> list:
@@ -2057,12 +2059,6 @@ def boolean_fragments(shapes: list, tolerance: float = 0.0) -> tuple[apiCompound
         raise CadQueryError("Boolean fragments operation failed")
 
     compound = cq.Shape.cast(algo.Shape())
-
-    # if not compound.isValid():
-    #     break
-    #     solids = _collect_subshapes(compound, cq.Solid)
-    #     if all(isinstance(s, cq.Solid) for s in solids):
-    #         compound = make_compound([_reconstruct_solid(s) for s in solids])
 
     # Build fragment map: for each input, collect its Modified/Generated outputs.
     # If a shape is unmodified (no intersection), its list is empty — matching
